@@ -5,49 +5,90 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.types import FSInputFile
+import yt_dlp
 
-# Включаем логирование, чтобы видеть ошибки в панели хостинга
+# Настройка логов
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Настройки авторизации (если хостинг не передал переменные — берутся данные из кавычек)
 BOT_TOKEN = os.getenv("BOT_TOKEN") or "7548847926:AAHszy_asqXAOX6faKs6Z32FJLQYc1DOOdY"
 ADMIN_ID = os.getenv("ADMIN_ID") or "7921743592"
 
-# Инициализируем бота и диспетчер по стандартам aiogram 3.x
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# Обработка команды /start
+# Функция для скачивания видео (работает в фоновом потоке)
+def download_video(url):
+    # Создаем папку для загрузок, если её нет
+    if not os.path.exists("downloads"):
+        os.makedirs("downloads")
+        
+    outtmpl = 'downloads/%(id)s.%(ext)s'
+    
+    ydl_opts = {
+        # Ищем лучшее качество, но строго в формате mp4, чтобы Telegram мог его воспроизвести
+        'format': 'best[ext=mp4]/best',
+        'outtmpl': outtmpl,
+        'no_warnings': True,
+        'quiet': True,
+    }
+    
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        filename = ydl.prepare_filename(info)
+        
+        # На всякий случай проверяем расширение файла
+        base, _ = os.path.splitext(filename)
+        real_filename = base + ".mp4"
+        
+        if os.path.exists(real_filename):
+            return real_filename
+        return filename
+
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
     await message.answer(
         f"Привет, {message.from_user.full_name}! 👋\n\n"
-        "Я твой бот-загрузчик. Отправь мне ссылку на YouTube видео или Shorts, и я скачаю её!"
+        "Отправь мне ссылку на YouTube видео или Shorts, и я пришлю тебе его в формате MP4!"
     )
 
-# Обработка входящих сообщений со ссылками
 @dp.message()
 async def handle_message(message: types.Message):
     text = message.text or ""
     
-    # Проверяем, есть ли в тексте намек на YouTube
     if "youtube.com" in text or "youtu.be" in text:
-        await message.answer("⏳ Начинаю скачивание видео, подождите...")
+        status_msg = await message.answer("⏳ Скачиваю видео, пожалуйста, подождите...")
         
-        # СЮДА можно вставить твою функцию скачивания через yt-dlp, если она была готова.
-        # Пока здесь просто текстовый ответ, чтобы бот не молчал.
-        await message.answer("Видео успешно обработано! (Интегрируйте ваш код скачивания сюда)")
+        try:
+            # Запускаем скачивание в отдельном потоке, чтобы бот не "усыпал"
+            loop = asyncio.get_event_loop()
+            file_path = await loop.run_in_executor(None, download_video, text)
+            
+            if os.path.exists(file_path):
+                await status_msg.edit_text("🚀 Видео скачано! Отправляю в чат...")
+                
+                # Отправляем видеофайл
+                video_file = FSInputFile(file_path)
+                await message.answer_video(video=video_file, caption="Твое видео готово! 🎬")
+                
+                # Удаляем файл с сервера хостинга, чтобы не забивать память
+                os.remove(file_path)
+                await status_msg.delete()
+            else:
+                await status_msg.edit_text("❌ Ошибка: не удалось найти скачанный файл на сервере.")
+                
+        except Exception as e:
+            logger.error(f"Ошибка при обработке: {e}")
+            await status_msg.edit_text(f"❌ Произошла ошибка при скачивании: {e}")
     else:
-        await message.answer("Пожалуйста, отправь мне корректную ссылку на YouTube.")
+        await message.answer("Пожалуйста, отправь мне рабочую ссылку на YouTube.")
 
-# Главная функция запуска
 async def main():
-    logger.info("Бот подготавливается к запуску...")
-    
-    # Эта строчка обязательна для вывода в консоль, чтобы хостинг понял, что всё ОК
-    print("Бот запущен!") 
-    
+    if not os.path.exists("downloads"):
+        os.makedirs("downloads")
+        
+    print("Бот запущен!")
     try:
         await dp.start_polling(bot)
     finally:
